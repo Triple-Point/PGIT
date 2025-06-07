@@ -1,109 +1,117 @@
+#!/usr/bin/env python3
 """
-check_video.py
+check_video.py – PGIT: Parental Guidance Inspection Tool
 
-AI Video Content Checker using opennsfw2
+Description:
+    This script scans a video file for NSFW content using the opennsfw2 model.
+    Any frame flagged as NSFW is blurred and saved to a new output video.
+    All other frames are copied unchanged.
 
-This script processes a video file (from local disk or URL stream),
-extracts frames at a defined interval, and uses a pre-trained NSFW
-model (opennsfw2) to detect inappropriate content in real-time.
+Attribution:
+    Developed with Open Source libraries:
+        - OpenCV for video processing
+        - Pillow for image format conversion
+        - opennsfw2 for NSFW detection (MIT license)
 
-Author: Mr Tree
-Project: PGIT (Parental Guidance Image Tester)
+Author: BiteMe / richardkilgour
 License: MIT
-Date: 2025-06-07
-
-Notes:
-- Uses open-source TensorFlow-based NSFW detector 'opennsfw2'.
-- Frames are sampled at 1 frame per second by default to balance speed and accuracy.
-- NSFW score threshold is configurable (default 0.5).
-- Video input can be a local file path or a stream URL.
-- No webcam used, per project requirements.
-
-Dependencies:
-- opennsfw2 (install via `pip install opennsfw2`)
-- opencv-python
-- numpy
-
 """
 
 import cv2
 from PIL import Image
 import opennsfw2 as n2
-import sys
+import argparse
+import os
+import time
+
+# ---- Parameters ----
+NSFW_THRESHOLD = 0.7  # Tune this value for stricter/looser filtering
+FRAME_SKIP = 1        # Process every frame (increase to speed up, at the cost of lower accuracy)
+BLUR_KERNEL = (101, 101)
+
+PIXELATE = True
+
+def pixelate(image, pixel_size=20):
+    h, w = image.shape[:2]
+    temp = cv2.resize(image, (w//pixel_size, h//pixel_size), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
-def check_video_nsfw(video_path, frame_rate=1, threshold=0.5):
-    """
-    Analyze a video file or stream for inappropriate content using opennsfw2.
-
-    Args:
-        video_path (str): Path or URL to the video file/stream.
-        frame_rate (int): Number of frames per second to analyze.
-        threshold (float): NSFW score threshold to flag inappropriate frames.
-
-    Returns:
-        List of tuples (timestamp_sec, nsfw_score) for frames exceeding threshold.
-    """
-    cap = cv2.VideoCapture(video_path)
+# ---- Main Function ----
+def check_video_nsfw(input_path, output_path):
+    # Open input video
+    cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
-        return []
+        print(f"Error: Cannot open video: {input_path}")
+        return
 
+    # Get video properties
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        print("Warning: Unable to get FPS from video, assuming 25 FPS.")
-        fps = 25
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use mp4v codec
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    frame_interval = int(fps / frame_rate)
-    if frame_interval == 0:
-        frame_interval = 1
+    print(f"Processing video: {input_path}")
+    print(f"Output will be saved to: {output_path}")
+    print(f"Resolution: {width}x{height}, FPS: {fps}")
 
-    flagged_frames = []
     frame_idx = 0
+    blurred_frames = 0
+    blurring_start_time = None
 
-    print(f"Processing video: {video_path}")
-    print(f"Video FPS: {fps}, analyzing every {frame_interval} frames (~{frame_rate} fps)")
+    processing_start_time = None # Track total processing time
+    last_log_second = -1  # Track last timestamp that was logged
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_idx % frame_interval == 0:
-            # opennsfw2 expects RGB images
+        if not processing_start_time:
+            processing_start_time= time.time()  # Track total processing time
+
+        if frame_idx % FRAME_SKIP == 0:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # NSFW score (0.0 to 1.0) for the frame
             pil_img = Image.fromarray(rgb_frame)
+
             nsfw_score = n2.predict_image(pil_img)
+            if nsfw_score >= NSFW_THRESHOLD:
+                if not blurring_start_time:
+                    blurring_start_time = frame_idx
+                if PIXELATE:
+                    frame = pixelate(frame, pixel_size=30)
+                else:  # Blur NSFW frame
+                    frame = cv2.GaussianBlur(frame, BLUR_KERNEL, 0)
+                blurred_frames += 1
+            elif blurring_start_time:
+                print(f"Blurred frames {blurring_start_time} through to {frame_idx}")
+                blurring_start_time = None
 
-            timestamp_sec = frame_idx / fps
+        # End of 10-second segment: print duration
+        if int(frame_idx) % (10 * fps) == 0:
+            segment_end = time.time()
+            print(f"Duration to process 10s of video: {segment_end - processing_start_time:.2f} seconds")
+            processing_start_time = None
 
-            print(f"Time {timestamp_sec:.1f}s: NSFW score = {nsfw_score:.3f}")
-
-            if nsfw_score >= threshold:
-                flagged_frames.append((timestamp_sec, nsfw_score))
-
+        out.write(frame)
         frame_idx += 1
 
+        if frame_idx >= 3000:
+            break
+
     cap.release()
-    return flagged_frames
+    out.release()
+    print(f"Done. Total frames processed: {frame_idx}. Blurred frames: {blurred_frames}.")
 
-
+# ---- CLI ----
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python check_video.py <video_path_or_url> [frame_rate] [threshold]")
-        print("Example: python check_video.py sample_movie.mp4 1 0.5")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Check video for NSFW content and censor frames.")
+    parser.add_argument("input", help="Input video file path")
+    parser.add_argument("output", nargs="?", help="Output video file path (default: _cleaned.mp4)", default=None)
 
-    video_file = sys.argv[1]
-    frame_rate = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    threshold = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
+    args = parser.parse_args()
+    input_file = args.input
+    output_file = args.output or os.path.splitext(input_file)[0] + "_cleaned.mp4"
 
-    flagged = check_video_nsfw(video_file, frame_rate=frame_rate, threshold=threshold)
-
-    if flagged:
-        print("\n⚠️ Inappropriate content detected at these timestamps:")
-        for t, score in flagged:
-            print(f" - {t:.1f} seconds (NSFW score: {score:.3f})")
-    else:
-        print("\n✅ No inappropriate content detected above threshold.")
+    check_video_nsfw(input_file, output_file)
