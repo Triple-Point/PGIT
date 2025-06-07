@@ -1,108 +1,109 @@
 """
 check_video.py
---------------
 
-This script scans a video file for inappropriate content (NSFW) using a pre-trained model.
-It is designed for educational use in a school AI project for children aged 10–12.
+AI Video Content Checker using opennsfw2
 
-⚠️ Important Notes:
-- No inappropriate content is ever shown to students.
-- The app analyzes video files (not webcam input) in real time or near-real time.
-- It uses a pre-trained, open-source model (`open_nsfw2`) to classify frames.
-- Every Nth frame is checked to reduce processing load.
-- The video is not altered or saved—only warnings are printed to the console.
+This script processes a video file (from local disk or URL stream),
+extracts frames at a defined interval, and uses a pre-trained NSFW
+model (opennsfw2) to detect inappropriate content in real-time.
 
-Created by BiteMe (https://github.com/BiteMe)
-AI-assisted with ChatGPT by OpenAI
-License: MIT or any compatible open-source license of your choice.
+Author: Mr Tree
+Project: PGIT (Parental Guidance Image Tester)
+License: MIT
+Date: 2025-06-07
 
-Dependencies (see requirements.txt):
+Notes:
+- Uses open-source TensorFlow-based NSFW detector 'opennsfw2'.
+- Frames are sampled at 1 frame per second by default to balance speed and accuracy.
+- NSFW score threshold is configurable (default 0.5).
+- Video input can be a local file path or a stream URL.
+- No webcam used, per project requirements.
+
+Dependencies:
+- opennsfw2 (install via `pip install opennsfw2`)
 - opencv-python
-- torch
-- torchvision
-- open-nsfw2
-- (optional) pytube for YouTube support (not used in this file)
+- numpy
 
-Setup Instructions:
-1. Install dependencies:
-   $ pip install -r requirements.txt
-
-2. Download the model weights:
-   - Visit https://github.com/EBazarov/open_nsfw2
-   - Download `nsfw_model.pt`
-   - Save it as: `./open_nsfw2/nsfw_model.pt`
-
-3. Place a sample video in the project directory, e.g., `sample_movie.mp4`.
-
-Usage:
-$ python check_video.py
-
-You can quit during playback with the 'q' key.
 """
 
 import cv2
-import os
-from nsfw_detector import predict
+from PIL import Image
+import opennsfw2 as n2
+import sys
 
-# -------------------- Settings --------------------
 
-VIDEO_PATH = "sample_movie.mp4"  # Replace with the path to your video file
-FRAME_SKIP = 30                  # Check every Nth frame (~1/sec for 30fps video)
-TEMP_FRAME = "temp_frame.jpg"    # Temp file used to classify frames
-THRESHOLD = 0.5                  # Probability above which we warn about NSFW
+def check_video_nsfw(video_path, frame_rate=1, threshold=0.5):
+    """
+    Analyze a video file or stream for inappropriate content using opennsfw2.
 
-# -------------------- Load Model --------------------
+    Args:
+        video_path (str): Path or URL to the video file/stream.
+        frame_rate (int): Number of frames per second to analyze.
+        threshold (float): NSFW score threshold to flag inappropriate frames.
 
-print("[INFO] Loading NSFW detection model...")
-model = predict.load_model("open_nsfw2/nsfw_model.pt")
-print("[INFO] Model loaded.")
+    Returns:
+        List of tuples (timestamp_sec, nsfw_score) for frames exceeding threshold.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video {video_path}")
+        return []
 
-# -------------------- Open Video --------------------
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        print("Warning: Unable to get FPS from video, assuming 25 FPS.")
+        fps = 25
 
-cap = cv2.VideoCapture(VIDEO_PATH)
+    frame_interval = int(fps / frame_rate)
+    if frame_interval == 0:
+        frame_interval = 1
 
-if not cap.isOpened():
-    print(f"[ERROR] Cannot open video file: {VIDEO_PATH}")
-    exit()
+    flagged_frames = []
+    frame_idx = 0
 
-frame_count = 0
-print(f"[INFO] Starting video analysis on '{VIDEO_PATH}'...")
+    print(f"Processing video: {video_path}")
+    print(f"Video FPS: {fps}, analyzing every {frame_interval} frames (~{frame_rate} fps)")
 
-# -------------------- Main Loop --------------------
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+        if frame_idx % frame_interval == 0:
+            # opennsfw2 expects RGB images
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # NSFW score (0.0 to 1.0) for the frame
+            pil_img = Image.fromarray(rgb_frame)
+            nsfw_score = n2.predict_image(pil_img)
 
-    frame_count += 1
+            timestamp_sec = frame_idx / fps
 
-    # Only analyze every Nth frame
-    if frame_count % FRAME_SKIP == 0:
-        # Save current frame as an image
-        cv2.imwrite(TEMP_FRAME, frame)
+            print(f"Time {timestamp_sec:.1f}s: NSFW score = {nsfw_score:.3f}")
 
-        # Classify the image
-        result = predict.classify(model, [TEMP_FRAME])
-        scores = result[TEMP_FRAME]
+            if nsfw_score >= threshold:
+                flagged_frames.append((timestamp_sec, nsfw_score))
 
-        # Combine NSFW categories
-        score = scores.get("porn", 0) + scores.get("sexy", 0) + scores.get("hentai", 0)
+        frame_idx += 1
 
-        if score >= THRESHOLD:
-            print(f"⚠️ NSFW content detected at frame {frame_count} (Score: {score:.2f})")
+    cap.release()
+    return flagged_frames
 
-    # Optionally show the video (only for teacher use)
-    cv2.imshow('Analyzing Video...', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
 
-# -------------------- Cleanup --------------------
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python check_video.py <video_path_or_url> [frame_rate] [threshold]")
+        print("Example: python check_video.py sample_movie.mp4 1 0.5")
+        sys.exit(1)
 
-cap.release()
-cv2.destroyAllWindows()
+    video_file = sys.argv[1]
+    frame_rate = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    threshold = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
 
-if os.path.exists(TEMP_FRAME):
-    os.remove(TEMP_FRAME)
+    flagged = check_video_nsfw(video_file, frame_rate=frame_rate, threshold=threshold)
 
-print("[INFO] Video analysis complete.")
+    if flagged:
+        print("\n⚠️ Inappropriate content detected at these timestamps:")
+        for t, score in flagged:
+            print(f" - {t:.1f} seconds (NSFW score: {score:.3f})")
+    else:
+        print("\n✅ No inappropriate content detected above threshold.")
