@@ -1,0 +1,5 @@
+opencv-python
+torch
+torchvision
+open-nsfw2
+pytube  # Optional for YouTube support
